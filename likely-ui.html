@@ -1,0 +1,147 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Smart Water Monitoring Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+  <style>
+    body{font-family:Arial;padding:20px;background:#f4f7fb}
+    .card{max-width:1000px;margin:0 auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+    canvas{height:380px!important}
+    .popup{display:none;position:fixed;top:20px;right:20px;background:#ff4444;color:#fff;padding:12px;border-radius:8px;z-index:999}
+    .alert{display:none;padding:12px;background:#ffecec;border-radius:8px;margin-top:12px;color:#a10000}
+    table{width:100%;border-collapse:collapse;margin-top:18px}
+    th,td{padding:8px;border:1px solid #e8eef8}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>💧 Smart Water Monitoring Dashboard</h2>
+    <p id="leakPrediction">No leak detected</p>
+    <canvas id="flowChart"></canvas>
+    <div class="alert" id="alertBox"></div>
+    <div class="popup" id="popupAlert"></div>
+
+    <h3>Recent Data (shows last 10 entries)</h3>
+    <table>
+      <thead><tr><th>Node</th><th>Zone</th><th>Time</th><th>Flow</th><th>Pressure</th><th>Status</th><th>Confidence</th><th>Est Loss</th></tr></thead>
+      <tbody id="anomalyTableBody"></tbody>
+    </table>
+  </div>
+
+<script>
+  // ======= FIREBASE CONFIG - replace with your project's config ========
+  const firebaseConfig = {
+    apiKey: "AIzaSyBmHSmj-retqc-34F08aQEsi7ufZpIu6sc",
+    authDomain: "smart-water-demo.firebaseapp.com",
+    databaseURL: "https://smart-water-demo-default-rtdb.firebaseio.com",
+    projectId: "smart-water-demo",
+    storageBucket: "smart-water-demo.appspot.com",
+    messagingSenderId: "1003772417379",
+    appId: "1:1003772417379:web:aad94691ffd1b7961faf56"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  // Chart.js setup
+  const ctx = document.getElementById('flowChart').getContext('2d');
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'Flow (L/min)', data: [], borderColor: 'green', fill:false, pointBackgroundColor: [] },
+        { label: 'Pressure', data: [], borderColor: 'blue', fill:false, pointBackgroundColor: [] }
+      ]
+    },
+    options: { responsive:true, scales:{ x:{ title:{display:true,text:'Time'}}, y:{title:{display:true,text:'Value'},min:0 } } }
+  });
+
+  const recent = []; // keep last 10 entries
+
+  function renderTable() {
+    const tbody = document.getElementById('anomalyTableBody');
+    tbody.innerHTML = recent.map(r => `
+      <tr>
+        <td>${r.node}</td>
+        <td>${r.zone}</td>
+        <td>${r.time}</td>
+        <td>${r.flow}</td>
+        <td>${r.pressure}</td>
+        <td>${r.status}</td>
+        <td>${r.confidence}</td>
+        <td>${r.est_loss}</td>
+      </tr>
+    `).join('');
+  }
+
+  function updateFromNode(nodeKey, entry) {
+    const timeLabel = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+
+    // push to chart
+    chart.data.labels.push(timeLabel);
+    chart.data.datasets[0].data.push(entry.flowRate ?? 0);
+    chart.data.datasets[1].data.push(entry.pressure ?? 0);
+
+    if (entry.status === 'Leak') {
+      chart.data.datasets[0].pointBackgroundColor.push('red');
+      chart.data.datasets[1].pointBackgroundColor.push('red');
+    } else {
+      chart.data.datasets[0].pointBackgroundColor.push('green');
+      chart.data.datasets[1].pointBackgroundColor.push('blue');
+    }
+
+    if (chart.data.labels.length > 20) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+      chart.data.datasets[1].data.shift();
+      chart.data.datasets[0].pointBackgroundColor.shift();
+      chart.data.datasets[1].pointBackgroundColor.shift();
+    }
+
+    // update recent table (unshift so newest is first)
+    recent.unshift({
+      node: nodeKey,
+      zone: entry.zone || '-',
+      time: timeLabel,
+      flow: entry.flowRate ?? '-',
+      pressure: entry.pressure ?? '-',
+      status: entry.status || 'Unknown',
+      confidence: entry.confidence ?? '-',
+      est_loss: entry.estimated_loss ?? '-'
+    });
+    if (recent.length > 10) recent.pop();
+    renderTable();
+
+    // alerts
+    if (entry.status === 'Leak') {
+      const popup = document.getElementById('popupAlert');
+      popup.innerHTML = `🚨 Leak in ${entry.zone || 'unknown'}<br>Est Loss: ${entry.estimated_loss ?? '-'} | Confidence: ${entry.confidence ?? '-'}%`;
+      popup.style.display = 'block';
+      setTimeout(()=> popup.style.display='none', 5000);
+
+      const alertBox = document.getElementById('alertBox');
+      alertBox.style.display = 'block';
+      alertBox.innerHTML = `🚨 Leak detected in ${entry.zone || 'unknown'} at ${timeLabel} — Flow: ${entry.flowRate} — Pressure: ${entry.pressure} — Est Loss: ${entry.estimated_loss} — Confidence: ${entry.confidence}%`;
+    } else {
+      document.getElementById('alertBox').style.display='none';
+      document.getElementById('leakPrediction').innerText = `No leak detected (confidence ${entry.confidence ?? '-' }%) at ${timeLabel}`;
+    }
+
+    chart.update();
+  }
+
+  // Listen for any changes under sensors_data
+  const ref = db.ref('sensors_data');
+  ref.on('child_added', snapshot => {
+    updateFromNode(snapshot.key, snapshot.val());
+  });
+  ref.on('child_changed', snapshot => {
+    updateFromNode(snapshot.key, snapshot.val());
+  });
+
+</script>
+</body>
+</html>
